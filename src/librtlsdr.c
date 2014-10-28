@@ -412,12 +412,22 @@ enum logop {
 	LOG_STRUCT
 };
 
-int logfile_open_read(rtlsdr_dev_t *dev, const char * filename)
+int rtlsdr_open_logfile(rtlsdr_dev_t **out_dev, const char * filename)
 {
 	uint32_t structlen;
 	int r;
+	rtlsdr_dev_t *dev = NULL;
 
-	dev->logfile = fopen(filename, "rb");
+	dev = malloc(sizeof(rtlsdr_dev_t));
+	if (NULL == dev)
+		return -ENOMEM;
+
+	memset(dev, 0, sizeof(rtlsdr_dev_t));
+
+	if (strcmp(filename, "-") == 0)
+		dev->logfile = stdin;
+	else
+		dev->logfile = fopen(filename, "rb");
 	if (!dev->logfile) {
 		fprintf(stderr, "Failed to open %s\n", filename);
 		return -1;
@@ -430,16 +440,20 @@ int logfile_open_read(rtlsdr_dev_t *dev, const char * filename)
 		fprintf(stderr, "Logfile structlen of %u mismatches %li\n", structlen, ((void*)&dev->logfile - (void*)dev));
 		return -2;
 	}
+
+	*out_dev = dev;
 	
 	return r;
 }
 
-int logfile_read(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_read)
+int rtlsdr_read_logfile(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_read)
 {
 	uint8_t op;
 	int r;
-	r = !fread(&op, sizeof(op), 1, dev->logfile);
-	while (!r) {
+	while (1) {
+		r = fread(&op, sizeof(op), 1, dev->logfile);
+		if (0 == r)
+			break;
 		switch(op) {
 		case LOG_TIME:
 			r = !fread(&dev->pre_t, sizeof(dev->pre_t), 1, dev->logfile);
@@ -448,8 +462,8 @@ int logfile_read(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_rea
 			r = !fread(dev, ((void*)&dev->logfile - (void*)dev), 1, dev->logfile);
 			break;
 		case LOG_DATA:
-			r = !fread(&n_read, sizeof(*n_read), 1, dev->logfile);
-			if (r)
+			r = !fread(n_read, sizeof(*n_read), 1, dev->logfile);
+			if (0 != r)
 				break;
 			if (*n_read > len) {
 				fprintf(stderr, "API buffer len %i < logfile buffer len %i\n", len, *n_read);
@@ -457,7 +471,7 @@ int logfile_read(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_rea
 			}
 			r = fread(buf, *n_read, 1, dev->logfile);
 			r |= fread(&op, sizeof(op), 1, dev->logfile);
-			if (!r && op != LOG_TIME)
+			if (0 == r && op != LOG_TIME)
 				return -4;
 			r |= fread(&dev->post_t, sizeof(dev->post_t), 1, dev->logfile);
 			return r;
@@ -470,11 +484,17 @@ int logfile_read(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_rea
 	return r;
 }
 
-int logfile_open_write(rtlsdr_dev_t *dev, const char * filename)
+int rtlsdr_begin_logfile(rtlsdr_dev_t *dev, const char * filename)
 {
 	uint32_t structlen;
 
-	dev->logfile = fopen(filename, "wb");
+	if (NULL != dev->logfile)
+		fclose(dev->logfile);
+
+	if (strcmp(filename, "-") == 0)
+		dev->logfile = stdin;
+	else
+		dev->logfile = fopen(filename, "wb");
 	if (!dev->logfile)
 		return -1;
 
@@ -530,7 +550,7 @@ void logfile_write_data(rtlsdr_dev_t *dev, void *buf, uint32_t len)
 
 void logfile_write_dev(rtlsdr_dev_t *dev)
 {
-	uint32_t op = LOG_STRUCT;
+	uint8_t op = LOG_STRUCT;
 	rtlsdr_dev_t copy;
 
 	if (!dev->logfile)
@@ -546,6 +566,12 @@ void logfile_write_dev(rtlsdr_dev_t *dev)
 	copy.logfile = 0;
 	fwrite(&op, sizeof(op), 1, dev->logfile);
 	fwrite(&copy, ((void*)&copy.logfile - (void*)&copy), 1, dev->logfile);
+}
+
+void rtlsdr_get_timestamp(rtlsdr_dev_t *dev, struct timespec *pre, struct timespec *post)
+{
+	*pre = dev->pre_t;
+	*post = dev->post_t;
 }
 
 int rtlsdr_read_array(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *array, uint8_t len)
@@ -1805,8 +1831,9 @@ found:
 
 	rtlsdr_set_i2c_repeater(dev, 0);
 
-	if (!dev->logfile && getenv("RTL_LOGFILE")) {
-		logfile_open_write(dev, getenv("RTL_LOGFILE"));
+	if (getenv("RTL_LOGFILE")) {
+		fprintf(stderr, "Logging binary data to %s\n", getenv("RTL_LOGFILE"));
+		rtlsdr_begin_logfile(dev, getenv("RTL_LOGFILE"));
 	}
 
 	*out_dev = dev;
@@ -1842,20 +1869,22 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 		rtlsdr_deinit_baseband(dev);
 	}
 
-	libusb_release_interface(dev->devh, 0);
+	if (dev->devh) {
+		libusb_release_interface(dev->devh, 0);
 
 #ifdef DETACH_KERNEL_DRIVER
-	if (dev->driver_active) {
-		if (!libusb_attach_kernel_driver(dev->devh, 0))
-			fprintf(stderr, "Reattached kernel driver\n");
-		else
-			fprintf(stderr, "Reattaching kernel driver failed!\n");
-	}
+		if (dev->driver_active) {
+			if (!libusb_attach_kernel_driver(dev->devh, 0))
+				fprintf(stderr, "Reattached kernel driver\n");
+			else
+				fprintf(stderr, "Reattaching kernel driver failed!\n");
+		}
 #endif
 
-	libusb_close(dev->devh);
+		libusb_close(dev->devh);
 
-	libusb_exit(dev->ctx);
+		libusb_exit(dev->ctx);
+	}
 
 	logfile_close(dev);
 
