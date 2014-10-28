@@ -1854,22 +1854,22 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 {
 	if (!dev)
 		return -1;
-	rtlsdr_set_i2c_repeater(dev, 0);
+	if (dev->devh) {
+		rtlsdr_set_i2c_repeater(dev, 0);
 
-	if(!dev->dev_lost) {
-		/* block until all async operations have been completed (if any) */
-		while (RTLSDR_INACTIVE != dev->async_status) {
+		if(!dev->dev_lost) {
+			/* block until all async operations have been completed (if any) */
+			while (RTLSDR_INACTIVE != dev->async_status) {
 #ifdef _WIN32
-			Sleep(1);
+				Sleep(1);
 #else
-			usleep(1000);
+				usleep(1000);
 #endif
+			}
+
+			rtlsdr_deinit_baseband(dev);
 		}
 
-		rtlsdr_deinit_baseband(dev);
-	}
-
-	if (dev->devh) {
 		libusb_release_interface(dev->devh, 0);
 
 #ifdef DETACH_KERNEL_DRIVER
@@ -1913,8 +1913,8 @@ int rtlsdr_read_sync(rtlsdr_dev_t *dev, void *buf, int len, int *n_read)
 
 	logfile_write_time(dev);
 	r = libusb_bulk_transfer(dev->devh, 0x81, buf, len, n_read, BULK_TIMEOUT);
-	if (r > 0)
-		logfile_write_data(dev, buf, r);
+	if (*n_read > 0)
+		logfile_write_data(dev, buf, *n_read);
 	return r;
 }
 
