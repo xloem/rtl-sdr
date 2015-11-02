@@ -53,7 +53,7 @@
 #include <io.h>
 #include "getopt/getopt.h"
 #define usleep(x) Sleep(x/1000)
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1800
 #define round(x) (x > 0.0 ? floor(x + 0.5): ceil(x - 0.5))
 #endif
 #define _USE_MATH_DEFINES
@@ -131,6 +131,8 @@ struct channel_solve
 	double crop, crop_tmp;
 };
 
+enum time_modes { VERBOSE_TIME, EPOCH_TIME };
+
 struct misc_settings
 {
 	int boxcar;
@@ -142,6 +144,7 @@ struct misc_settings
 	int gain;
 	double (*window_fn)(int, int);
 	int smoothing;
+	enum time_modes time_mode;
 };
 
 /* 3000 is enough for 3GHz b/w worst case */
@@ -183,6 +186,7 @@ void usage(void)
 		"\t  try -F 0 with '-c 50%%' to hide the roll off\n"
 		"\t[-r max_sample_rate (default: 2.4M)]\n"
 		"\t  possible values are 2M to 3.2M\n"
+		"\t[-E enables epoch timestamps (default: off/verbose)]\n"
 		"\t[-P enables peak hold (default: off/averaging)]\n"
 		"\t[-L enable linear output (default: off/dB)]\n"
 		"\t[-D direct_sampling_mode, 0 (default/off), 1 (I), 2 (Q), 3 (no-mod)]\n"
@@ -260,7 +264,7 @@ int cic_9_tables[][10] = {
 	{9, -199, -362, 5303, -25505, 77489, -25505, 5303, -362, -199},
 };
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1800
 double log2(double n)
 {
 	return log(n) / log(2.0);
@@ -552,9 +556,32 @@ int solve_downsample(struct channel_solve *c, int target_rate, int boxcar)
 	return 0;
 }
 
+int solve_single(struct channel_solve *c, int target_rate)
+{
+	int i, scan_size, bins_all, bins_crop, bin_e, bins_2, bw_needed;
+	scan_size = c->upper - c->lower;
+	bins_all = scan_size / c->bin_spec;
+	bins_crop = (int)ceil((double)bins_all * (1.0 + c->crop));
+	bin_e = (int)ceil(log2(bins_crop));
+	bins_2 = 1 << bin_e;
+	bw_needed = bins_2 * c->bin_spec;
+
+	if (bw_needed > target_rate) {
+		/* actually multi-hop */
+		return 1;}
+
+	c->bw_wanted = scan_size;
+	c->bw_needed = bw_needed;
+	c->hops = 1;
+	c->bin_e = bin_e;
+	/* crop will always be bigger than specified crop */
+	c->crop_tmp = (double)(bins_2 - bins_all) / (double)bins_2;
+	return 0;
+}
+
 int solve_hopping(struct channel_solve *c, int target_rate)
 {
-	int i, scan_size, bins_all, bins_crop, bins_2, min_hops;
+	int i, scan_size, bins_all, bins_sub, bins_crop, bins_2, min_hops;
 	scan_size = c->upper - c->lower;
 	min_hops = scan_size / MAXIMUM_RATE - 1;
 	if (min_hops < 1) {
@@ -563,11 +590,12 @@ int solve_hopping(struct channel_solve *c, int target_rate)
 	for (i=min_hops; i<MAX_TUNES; i++) {
 		c->bw_wanted = scan_size / i;
 		bins_all = scan_size / c->bin_spec;
-		bins_crop = (int)ceil((double)bins_all / (double)i);
+		bins_sub = (int)ceil((double)bins_all / (double)i);
+		bins_crop = (int)ceil((double)bins_sub * (1.0 + c->crop));
 		c->bin_e = (int)ceil(log2(bins_crop));
 		bins_2 = 1 << c->bin_e;
 		c->bw_needed = bins_2 * c->bin_spec;
-		c->crop_tmp = (double)(bins_2 - bins_crop) / (double)bins_2;
+		c->crop_tmp = (double)(bins_2 - bins_sub) / (double)bins_2;
 		if (c->bw_needed > target_rate) {
 			continue;}
 		if (c->crop_tmp < c->crop) {
@@ -583,7 +611,7 @@ void frequency_range(char *arg, struct misc_settings *ms)
 {
 	struct channel_solve c;
 	struct tuning_state *ts;
-	int i, j, buf_len, length, hop_bins, logged_bins, planned_bins;
+	int r, i, j, buf_len, length, hop_bins, logged_bins, planned_bins;
 	int lower_edge, actual_bw, upper_perfect, remainder;
 
 	fprintf(stderr, "Range: %s\n", arg);
@@ -603,15 +631,24 @@ void frequency_range(char *arg, struct misc_settings *ms)
 		exit(1);
 	}
 
-
+	r = -1;
 	if (c.bin_spec >= MINIMUM_RATE) {
 		fprintf(stderr, "Mode: rms power\n");
 		solve_giant_bins(&c);
 	} else if ((c.upper - c.lower) < MINIMUM_RATE) {
 		fprintf(stderr, "Mode: downsampling\n");
 		solve_downsample(&c, ms->target_rate, ms->boxcar);
+	} else if ((c.upper - c.lower) < MAXIMUM_RATE) {
+		r = solve_single(&c, ms->target_rate);
 	} else {
-		fprintf(stderr, "Mode: normal\n");
+		fprintf(stderr, "Mode: hopping\n");
+		solve_hopping(&c, ms->target_rate);
+	}
+
+	if (r == 0) {
+		fprintf(stderr, "Mode: single\n");
+	} else if (r == 1) {
+		fprintf(stderr, "Mode: hopping\n");
 		solve_hopping(&c, ms->target_rate);
 	}
 	c.crop = c.crop_tmp;
@@ -830,7 +867,7 @@ int64_t real_conj(int16_t real, int16_t imag)
 
 void scanner(void)
 {
-	int i, j, j2, f, g, n_read, offset, bin_e, bin_len, buf_len, ds, ds_p;
+	int i, j, j2, n_read, offset, bin_e, bin_len, buf_len, ds, ds_p;
 	int32_t w;
 	struct tuning_state *ts;
 	int16_t *fft_buf;
@@ -912,12 +949,11 @@ void scanner(void)
 
 void csv_dbm(struct tuning_state *ts)
 {
-	int i, len, ds;
+	int i, len;
 	int64_t tmp;
 	double dbm;
 	char *sep = ", ";
 	len = 1 << ts->bin_e;
-	ds = ts->downsample;
 	/* fix FFT stuff quirks */
 	if (ts->bin_e > 0) {
 		/* nuke DC component (not effective for all windows) */
@@ -939,7 +975,9 @@ void csv_dbm(struct tuning_state *ts)
 		}
 		dbm  = (double)ts->avg[i];
 		dbm /= (double)ts->rate;
-		dbm /= (double)ts->samples;
+		if (!ts->peak_hold) {
+			dbm /= (double)ts->samples;
+		}
 		if (ts->linear) {
 			fprintf(file, "%.5g%s", dbm, sep);
 		} else {
@@ -964,6 +1002,7 @@ void init_misc(struct misc_settings *ms)
 	ms->smoothing = 0;
 	ms->peak_hold = 0;
 	ms->linear = 0;
+	ms->time_mode = VERBOSE_TIME;
 }
 
 int main(int argc, char **argv)
@@ -972,9 +1011,10 @@ int main(int argc, char **argv)
 	struct sigaction sigact;
 #endif
 	char *filename = NULL;
-	int i, r, opt, wb_mode = 0;
+	int i, r, opt;
 	int f_set = 0;
 	int dev_index = 0;
+	char dev_label[255];
 	int dev_given = 0;
 	int ppm_error = 0;
 	int custom_ppm = 0;
@@ -992,8 +1032,9 @@ int main(int argc, char **argv)
 	struct misc_settings ms;
 	freq_optarg = "";
 	init_misc(&ms);
+	strcpy(dev_label, "DEFAULT");
 
-	while ((opt = getopt(argc, argv, "f:i:s:r:t:d:g:p:e:w:c:F:1PLD:Oh")) != -1) {
+	while ((opt = getopt(argc, argv, "f:i:s:r:t:d:g:p:e:w:c:F:1EPLD:Oh")) != -1) {
 		switch (opt) {
 		case 'f': // lower:upper:bin_size
 			if (f_set) {
@@ -1003,6 +1044,7 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			dev_index = verbose_device_search(optarg);
+			strncpy(dev_label, optarg, 255);
 			dev_given = 1;
 			break;
 		case 'g':
@@ -1053,6 +1095,9 @@ int main(int argc, char **argv)
 			break;
 		case '1':
 			single = 1;
+			break;
+		case 'E':
+			ms.time_mode = EPOCH_TIME;
 			break;
 		case 'P':
 			ms.peak_hold = 1;
@@ -1181,7 +1226,12 @@ int main(int argc, char **argv)
 			continue;}
 		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
 		cal_time = localtime(&time_now);
-		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
+		if (ms.time_mode == VERBOSE_TIME) {
+			strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
+		}
+		if (ms.time_mode == EPOCH_TIME) {
+			snprintf(t_str, 50, "%u, %s", (unsigned)time_now, dev_label);
+		}
 		for (i=0; i<tune_count; i++) {
 			fprintf(file, "%s, ", t_str);
 			csv_dbm(&tunes[i]);

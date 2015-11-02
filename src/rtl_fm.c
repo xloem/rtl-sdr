@@ -63,7 +63,7 @@
 #include <io.h>
 #include "getopt/getopt.h"
 #define usleep(x) Sleep(x/1000)
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1800
 #define round(x) (x > 0.0 ? floor(x + 0.5): ceil(x - 0.5))
 #endif
 #define _USE_MATH_DEFINES
@@ -102,6 +102,13 @@ static int atan_lut_coef = 8;
 #define SHARED_SIZE 6
 int16_t shared_samples[SHARED_SIZE][MAXIMUM_BUF_LENGTH];
 int ss_busy[SHARED_SIZE] = {0};
+
+enum agc_mode_t
+{
+	agc_off = 0,
+	agc_normal,
+	agc_aggressive
+};
 
 struct dongle_state
 {
@@ -170,7 +177,7 @@ struct demod_state
 	int      dc_block, dc_avg;
 	int      rotate_enable;
 	struct   translate_state rotate;
-	int      agc_enable;
+	enum	 agc_mode_t agc_mode;
 	struct   agc_state *agc;
 	void     (*mode_demod)(struct demod_state*);
 	pthread_rwlock_t rw;
@@ -248,13 +255,12 @@ void usage(void)
 		"\t    no-dc:  disable dc blocking filter\n"
 		"\t    deemp:  enable de-emphasis filter\n"
 		"\t    swagc:  enable software agc (only for AM modes)\n"
+		"\t    swagc-aggressive:  enable aggressive software agc (only for AM modes)\n"
 		"\t    direct: enable direct sampling\n"
 		"\t    no-mod: enable no-mod direct sampling\n"
 		"\t    offset: enable offset tuning\n"
 		"\t    wav:    generate WAV header\n"
-#ifndef _WIN32
 		"\t    pad:    pad output gaps with zeros\n"
-#endif
 		"\t    lrmix:  one channel goes to left audio, one to right (broken)\n"
 		"\t            remember to enable stereo (-c 2) in sox\n"
 		"\tfilename ('-' means stdout)\n"
@@ -324,7 +330,7 @@ int cic_9_tables[][10] = {
 	{9, -199, -362, 5303, -25505, 77489, -25505, 5303, -362, -199},
 };
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && _MSC_VER < 1800
 double log2(double n)
 {
 	return log(n) / log(2.0);
@@ -757,7 +763,7 @@ void dc_block_filter(struct demod_state *fm)
 	for (i=0; i < fm->lp_len; i++) {
 		sum += lp[i];
 	}
-	avg = sum / fm->lp_len;
+	avg = (int)(sum / fm->lp_len);
 	avg = (avg + fm->dc_avg * 9) / 10;
 	for (i=0; i < fm->lp_len; i++) {
 		lp[i] -= avg;
@@ -825,19 +831,31 @@ void software_agc(struct demod_state *d)
 {
 	int i = 0;
 	int peaked = 0;
-	int32_t output;
+	int32_t output = 0;
+	int abs_output = 0;
 	struct agc_state *agc = d->agc;
 	int16_t *lp = d->lowpassed;
+	int attack_step = agc->attack_step;
+	int aggressive = agc_aggressive == d->agc_mode;
+	float peak_factor = 1.0;
 
 	for (i=0; i < d->lp_len; i++) {
 		output = (int32_t)lp[i] * agc->gain_num + agc->error;
 		agc->error = output % agc->gain_den;
 		output /= agc->gain_den;
+		abs_output = abs(output);
+		peaked = abs_output > agc->peak_target;
+		
+		if (peaked && aggressive && attack_step <= 1) {
+			peak_factor = fmin(5.0, (float) abs_output / agc->peak_target);
+			attack_step = (int) (pow(agc->attack_step - peak_factor, peak_factor) * (176 + 3 * peak_factor));
+		}
 
-		if (!peaked && abs(output) > agc->peak_target) {
-			peaked = 1;}
 		if (peaked) {
-			agc->gain_num += agc->attack_step;
+			agc->gain_num -= attack_step;
+			if (aggressive) { 
+				attack_step = (int) (attack_step / 1.2); 
+			}
 		} else {
 			agc->gain_num += agc->decay_step;
 		}
@@ -903,7 +921,7 @@ void full_demod(struct demod_state *d)
 		return;}
 	if (d->dc_block) {
 		dc_block_filter(d);}
-	if (d->agc_enable) {
+	if (d->agc_mode != agc_off) {
 		software_agc(d);}
 	/* todo, fm noise squelch */
 	// use nicer filter here too?
@@ -947,13 +965,15 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 {
 	int i;
 	struct dongle_state *s = ctx;
-	struct demod_state *d  = s->targets[0];
-	struct demod_state *d2 = s->targets[1];
+	struct demod_state *d;
+	struct demod_state *d2;
 
 	if (do_exit) {
 		return;}
-	if (!ctx) {
+	if (!s) {
 		return;}
+	d  = s->targets[0];
+	d2 = s->targets[1];
 	if (s->mute) {
 		for (i=0; i<s->mute; i++) {
 			buf[i] = 127;}
@@ -1040,11 +1060,18 @@ static void *output_thread_fn(void *arg)
 	struct output_state *s = arg;
 	struct buffer_bucket *b0 = &s->results[0];
 	struct buffer_bucket *b1 = &s->results[1];
+	int64_t i, duration, samples = 0LL, samples_now;
+#ifdef _WIN32
+	LARGE_INTEGER perfFrequency;
+	LARGE_INTEGER start_time;
+	LARGE_INTEGER now_time;
+
+	QueryPerformanceFrequency(&perfFrequency);
+	QueryPerformanceCounter(&start_time);
+#else
 	struct timespec start_time;
 	struct timespec now_time;
-	int64_t i, duration, samples, samples_now;
-	samples = 0L;
-#ifndef _WIN32
+
 	get_nanotime(&start_time);
 #endif
 	while (!do_exit) {
@@ -1071,10 +1098,9 @@ static void *output_thread_fn(void *arg)
 			pthread_rwlock_unlock(&b0->rw);
 			continue;
 		}
-#ifndef _WIN32
+
 		/* padding requires output at constant rate */
 		/* pthread_cond_timedwait is terrible, roll our own trycond */
-		// figure out how to do this with windows HPET
 		usleep(2000);
 		pthread_mutex_lock(&b0->trycond_m);
 		r = b0->trycond;
@@ -1088,11 +1114,17 @@ static void *output_thread_fn(void *arg)
 			pthread_rwlock_unlock(&b0->rw);
 			continue;
 		}
+#ifdef _WIN32
+		QueryPerformanceCounter(&now_time);
+		duration = now_time.QuadPart - start_time.QuadPart;
+		samples_now = (duration * s->rate) / perfFrequency.QuadPart;
+#else
 		get_nanotime(&now_time);
 		duration = now_time.tv_sec - start_time.tv_sec;
 		duration *= 1000000000L;
 		duration += (now_time.tv_nsec - start_time.tv_nsec);
-		samples_now = (duration * (int64_t)s->rate) / 1000000000L;
+		samples_now = (duration * s->rate) / 1000000000UL;
+#endif
 		if (samples_now < samples) {
 			continue;}
 		for (i=samples; i<samples_now; i++) {
@@ -1100,7 +1132,6 @@ static void *output_thread_fn(void *arg)
 			fputc(0, s->file);
 		}
 		samples = samples_now;
-#endif
 	}
 	return 0;
 }
@@ -1156,7 +1187,7 @@ void clone_demod(struct demod_state *d2, struct demod_state *d1)
 	d2->deemph_a = d1->deemph_a;
 	d2->dc_block = d1->dc_block;
 	d2->rotate_enable = d1->rotate_enable;
-	d2->agc_enable = d1->agc_enable;
+	d2->agc_mode = d1->agc_mode;
 	d2->mode_demod = d1->mode_demod;
 }
 
@@ -1299,7 +1330,7 @@ void demod_init(struct demod_state *s)
 	s->post_downsample = 1;  // once this works, default = 4
 	s->custom_atan = 0;
 	s->deemph = 0;
-	s->agc_enable = 0;
+	s->agc_mode = agc_off;
 	s->rotate_enable = 0;
 	s->rotate.len = 0;
 	s->rotate.sincos = NULL;
@@ -1392,18 +1423,22 @@ void sanity_checks(void)
 
 int agc_init(struct demod_state *s)
 {
-	int i;
 	struct agc_state *agc;
 
 	agc = malloc(sizeof(struct agc_state));
 	s->agc = agc;
 
 	agc->gain_den = 1<<15;
-	agc->gain_num = agc->gain_den;
 	agc->peak_target = 1<<14;
 	agc->gain_max = 256 * agc->gain_den;
-	agc->decay_step = 1;
-	agc->attack_step = -2;
+	agc->gain_num = agc->gain_den;
+	agc->decay_step = 1; 
+	agc->attack_step = 2; 
+	if (s->agc_mode == agc_aggressive) {
+		agc->decay_step = agc->decay_step * 4; 
+		agc->attack_step = agc->attack_step * 5; 
+	}
+
 	return 0;
 }
 
@@ -1453,7 +1488,6 @@ int main(int argc, char **argv)
 	dongle_init(&dongle);
 	demod_init(&demod);
 	demod_init(&demod2);
-	agc_init(&demod);
 	output_init(&output);
 	controller_init(&controller);
 
@@ -1513,7 +1547,9 @@ int main(int argc, char **argv)
 			if (strcmp("deemp",  optarg) == 0) {
 				demod.deemph = 1;}
 			if (strcmp("swagc",  optarg) == 0) {
-				demod.agc_enable = 1;}
+				demod.agc_mode = agc_normal;}
+			if (strcmp("swagc-aggressive",  optarg) == 0) {
+				demod.agc_mode = agc_aggressive;}
 			if (strcmp("direct",  optarg) == 0) {
 				dongle.direct_sampling = 1;}
 			if (strcmp("no-mod",  optarg) == 0) {
@@ -1572,6 +1608,8 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+
+	agc_init(&demod);
 
 	/* quadruple sample_rate to limit to Δθ to ±π/2 */
 	demod.rate_in *= demod.post_downsample;

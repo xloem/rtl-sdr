@@ -877,7 +877,7 @@ int rtlsdr_set_if_freq(rtlsdr_dev_t *dev, uint32_t freq)
 	if (rtlsdr_get_xtal_freq(dev, &rtl_xtal, NULL))
 		return -2;
 
-	if_freq = ((freq * TWO_POW(22)) / rtl_xtal) * (-1);
+	if_freq = (int32_t)(((freq * TWO_POW(22)) / rtl_xtal) * -1);
 
 	tmp = (if_freq >> 16) & 0x3f;
 	r = rtlsdr_demod_write_reg(dev, 1, 0x19, tmp, 1);
@@ -900,7 +900,7 @@ int rtlsdr_set_sample_freq_correction(rtlsdr_dev_t *dev, int ppm)
 {
 	int r = 0;
 	uint8_t tmp;
-	int16_t offs = ppm * (-1) * TWO_POW(24) / 1000000;
+	int16_t offs = (int16_t)(ppm * -1 * TWO_POW(24) / 1000000);
 	rtlsdr_set_i2c_repeater(dev, 0);
 
 	tmp = offs & 0xff;
@@ -1014,10 +1014,10 @@ int rtlsdr_write_eeprom(rtlsdr_dev_t *dev, uint8_t *data, uint8_t offset, uint16
 	int r = 0;
 	int i;
 	uint8_t cmd[2];
-	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if (!dev)
 		return -1;
+	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if ((len + offset) > 256)
 		return -2;
@@ -1052,10 +1052,10 @@ int rtlsdr_read_eeprom(rtlsdr_dev_t *dev, uint8_t *data, uint8_t offset, uint16_
 {
 	int r = 0;
 	int i;
-	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if (!dev)
 		return -1;
+	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if ((len + offset) > 256)
 		return -2;
@@ -1110,10 +1110,10 @@ uint32_t rtlsdr_get_center_freq(rtlsdr_dev_t *dev)
 int rtlsdr_set_freq_correction(rtlsdr_dev_t *dev, int ppm)
 {
 	int r = 0;
-	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if (!dev)
 		return -1;
+	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if (dev->corr == ppm)
 		return -2;
@@ -1285,7 +1285,7 @@ int rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate)
 		return -EINVAL;
 	}
 
-	rsamp_ratio = (dev->rtl_xtal * TWO_POW(22)) / samp_rate;
+	rsamp_ratio = (uint32_t)((dev->rtl_xtal * TWO_POW(22)) / samp_rate);
 	rsamp_ratio &= 0x0ffffffc;
 
 	real_rsamp_ratio = rsamp_ratio | ((rsamp_ratio & 0x08000000) << 1);
@@ -1453,10 +1453,10 @@ int rtlsdr_get_direct_sampling(rtlsdr_dev_t *dev)
 int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 {
 	int r = 0;
-	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if (!dev)
 		return -1;
+	rtlsdr_set_i2c_repeater(dev, 0);
 
 	if ((dev->tuner_type == RTLSDR_TUNER_R820T) ||
 	    (dev->tuner_type == RTLSDR_TUNER_R828D))
@@ -2056,7 +2056,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 		logfile_write_time(dev);
 		r = libusb_submit_transfer(dev->xfer[i]);
 		if (r < 0) {
-			fprintf(stderr, "Failed to submit transfer %i!\n", i);
+			fprintf(stderr, "Failed to submit transfer %u!\n", i);
 			dev->async_status = RTLSDR_CANCELING;
 			break;
 		}
