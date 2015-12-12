@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #ifndef _WIN32
 #include <unistd.h>
 #define min(a, b) (((a) < (b)) ? (a) : (b))
@@ -124,6 +125,10 @@ struct rtlsdr_dev {
 	int dev_lost;
 	int driver_active;
 	unsigned int xfer_errors;
+	/* logfile */
+	FILE *logfile;
+	struct timespec pre_t;
+	struct timespec post_t;
 };
 
 void rtlsdr_set_gpio_bit(rtlsdr_dev_t *dev, uint8_t gpio, int val);
@@ -403,6 +408,174 @@ enum blocks {
 	IRB			= 5,
 	IICB			= 6,
 };
+
+enum logop {
+	LOG_DATA,
+	LOG_TIME,
+	LOG_STRUCT
+};
+
+int rtlsdr_open_logfile(rtlsdr_dev_t **out_dev, const char * filename)
+{
+	uint32_t structlen;
+	int r;
+	rtlsdr_dev_t *dev = NULL;
+
+	dev = malloc(sizeof(rtlsdr_dev_t));
+	if (NULL == dev)
+		return -ENOMEM;
+
+	memset(dev, 0, sizeof(rtlsdr_dev_t));
+
+	if (strcmp(filename, "-") == 0)
+		dev->logfile = stdin;
+	else
+		dev->logfile = fopen(filename, "rb");
+	if (!dev->logfile) {
+		fprintf(stderr, "Failed to open %s\n", filename);
+		return -1;
+	}
+	
+	r = !fread(&structlen, sizeof(structlen), 1, dev->logfile);
+	if (r)
+		return r;
+	if (structlen != ((void*)&dev->logfile - (void*)dev)) {
+		fprintf(stderr, "Logfile structlen of %u mismatches %li\n", structlen, ((void*)&dev->logfile - (void*)dev));
+		return -2;
+	}
+
+	*out_dev = dev;
+	
+	return r;
+}
+
+int rtlsdr_read_logfile(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_read)
+{
+	uint8_t op;
+	int r;
+	while (1) {
+		r = fread(&op, sizeof(op), 1, dev->logfile);
+		if (0 == r)
+			break;
+		switch(op) {
+		case LOG_TIME:
+			r = !fread(&dev->pre_t, sizeof(dev->pre_t), 1, dev->logfile);
+			break;
+		case LOG_STRUCT:
+			r = !fread(dev, ((void*)&dev->logfile - (void*)dev), 1, dev->logfile);
+			break;
+		case LOG_DATA:
+			r = !fread(n_read, sizeof(*n_read), 1, dev->logfile);
+			if (0 != r)
+				break;
+			if (*n_read > len) {
+				fprintf(stderr, "API buffer len %i < logfile buffer len %i\n", len, *n_read);
+				return -3;
+			}
+			r = fread(buf, *n_read, 1, dev->logfile);
+			r |= fread(&op, sizeof(op), 1, dev->logfile);
+			if (0 == r && op != LOG_TIME)
+				return -4;
+			r |= fread(&dev->post_t, sizeof(dev->post_t), 1, dev->logfile);
+			return r;
+		default:
+			fprintf(stderr, "Invalid logfile item\n");
+			r = -2;
+			break;
+		}
+	}
+	return r;
+}
+
+int rtlsdr_begin_logfile(rtlsdr_dev_t *dev, const char * filename)
+{
+	uint32_t structlen;
+
+	if (NULL != dev->logfile)
+		fclose(dev->logfile);
+
+	if (strcmp(filename, "-") == 0)
+		dev->logfile = stdin;
+	else
+		dev->logfile = fopen(filename, "wb");
+	if (!dev->logfile)
+		return -1;
+
+	structlen = ((void*)&dev->logfile - (void*)dev);
+	fwrite(&structlen, sizeof(structlen), 1, dev->logfile);
+
+	return 0;
+}
+
+int logfile_close(rtlsdr_dev_t *dev)
+{
+	int r;
+
+	if (!dev->logfile)
+		return 0;
+
+	r = fclose(dev->logfile);
+
+	dev->logfile = 0;
+	return r;
+}
+
+void logfile_write_time(rtlsdr_dev_t *dev)
+{
+	uint8_t op = LOG_TIME;
+
+	if (!dev->logfile)
+		return;
+
+	clock_gettime(CLOCK_REALTIME, &dev->pre_t);
+	
+	fwrite(&op, sizeof(op), 1, dev->logfile);
+	fwrite(&dev->pre_t, sizeof(dev->pre_t), 1, dev->logfile);
+}
+
+void logfile_write_data(rtlsdr_dev_t *dev, void *buf, uint32_t len)
+{
+	uint8_t op = LOG_DATA;
+
+	if (!dev->logfile)
+		return;
+
+	clock_gettime(CLOCK_REALTIME, &dev->post_t);
+
+	fwrite(&op, sizeof(op), 1, dev->logfile);
+	fwrite(&len, sizeof(len), 1, dev->logfile);
+	fwrite(buf, len, 1, dev->logfile);
+	
+	op = LOG_TIME;
+	fwrite(&op, sizeof(op), 1, dev->logfile);
+	fwrite(&dev->post_t, sizeof(dev->post_t), 1, dev->logfile);
+}
+
+void logfile_write_dev(rtlsdr_dev_t *dev)
+{
+	uint8_t op = LOG_STRUCT;
+	rtlsdr_dev_t copy;
+
+	if (!dev->logfile)
+		return;
+
+	copy = *dev;
+	copy.ctx = 0;
+	copy.devh = 0;
+	copy.xfer = 0;
+	copy.xfer_buf = 0;
+	copy.cb_ctx = 0;
+	copy.tuner = 0;
+	copy.logfile = 0;
+	fwrite(&op, sizeof(op), 1, dev->logfile);
+	fwrite(&copy, ((void*)&copy.logfile - (void*)&copy), 1, dev->logfile);
+}
+
+void rtlsdr_get_timestamp(rtlsdr_dev_t *dev, struct timespec *pre, struct timespec *post)
+{
+	*pre = dev->pre_t;
+	*post = dev->post_t;
+}
 
 int rtlsdr_read_array(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *array, uint8_t len)
 {
@@ -752,8 +925,10 @@ int rtlsdr_set_xtal_freq(rtlsdr_dev_t *dev, uint32_t rtl_freq, uint32_t tuner_fr
 
 		/* read corrected clock value into e4k and r82xx structure */
 		if (rtlsdr_get_xtal_freq(dev, NULL, &dev->e4k_s.vco.fosc) ||
-		    rtlsdr_get_xtal_freq(dev, NULL, &dev->r82xx_c.xtal))
+		    rtlsdr_get_xtal_freq(dev, NULL, &dev->r82xx_c.xtal)) {
+		    	logfile_write_dev(dev);
 			return -3;
+		}
 
 		/* update xtal-dependent settings */
 		if (dev->freq)
@@ -902,6 +1077,8 @@ int rtlsdr_set_center_freq(rtlsdr_dev_t *dev, uint32_t freq)
 		dev->freq = freq;
 	else
 		dev->freq = 0;
+	
+	logfile_write_dev(dev);
 
 	return r;
 }
@@ -930,11 +1107,15 @@ int rtlsdr_set_freq_correction(rtlsdr_dev_t *dev, int ppm)
 
 	/* read corrected clock value into e4k and r82xx structure */
 	if (rtlsdr_get_xtal_freq(dev, NULL, &dev->e4k_s.vco.fosc) ||
-	    rtlsdr_get_xtal_freq(dev, NULL, &dev->r82xx_c.xtal))
+	    rtlsdr_get_xtal_freq(dev, NULL, &dev->r82xx_c.xtal)) {
+	    	logfile_write_dev(dev);
 		return -3;
+	}
 
 	if (dev->freq) /* retune to apply new correction value */
 		r |= rtlsdr_set_center_freq(dev, dev->freq);
+	else
+		logfile_write_dev(dev);
 
 	return r;
 }
@@ -1044,6 +1225,8 @@ int rtlsdr_set_tuner_gain(rtlsdr_dev_t *dev, int gain)
 		dev->gain = gain;
 	else
 		dev->gain = 0;
+	
+	logfile_write_dev(dev);
 
 	return r;
 }
@@ -1136,6 +1319,8 @@ int rtlsdr_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate)
 	/* recalculate offset frequency if offset tuning is enabled */
 	if (dev->offs_freq)
 		rtlsdr_set_offset_tuning(dev, 1);
+	else
+		logfile_write_dev(dev);
 
 	return r;
 }
@@ -1269,6 +1454,8 @@ int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 
 	if (dev->freq > dev->offs_freq)
 		r |= rtlsdr_set_center_freq(dev, dev->freq);
+	else
+		logfile_write_dev(dev);
 
 	return r;
 }
@@ -1610,6 +1797,11 @@ found:
 
 	rtlsdr_set_i2c_repeater(dev, 0);
 
+	if (getenv("RTL_LOGFILE")) {
+		fprintf(stderr, "Logging binary data to %s\n", getenv("RTL_LOGFILE"));
+		rtlsdr_begin_logfile(dev, getenv("RTL_LOGFILE"));
+	}
+
 	*out_dev = dev;
 
 	return 0;
@@ -1629,33 +1821,38 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 	if (!dev)
 		return -1;
 
-	if(!dev->dev_lost) {
-		/* block until all async operations have been completed (if any) */
-		while (RTLSDR_INACTIVE != dev->async_status) {
+	if (dev->devh) {
+	
+		if(!dev->dev_lost) {
+			/* block until all async operations have been completed (if any) */
+			while (RTLSDR_INACTIVE != dev->async_status) {
 #ifdef _WIN32
-			Sleep(1);
+				Sleep(1);
 #else
-			usleep(1000);
+				usleep(1000);
 #endif
+			}
+	
+			rtlsdr_deinit_baseband(dev);
 		}
-
-		rtlsdr_deinit_baseband(dev);
-	}
-
-	libusb_release_interface(dev->devh, 0);
-
+	
+		libusb_release_interface(dev->devh, 0);
+	
 #ifdef DETACH_KERNEL_DRIVER
-	if (dev->driver_active) {
-		if (!libusb_attach_kernel_driver(dev->devh, 0))
-			fprintf(stderr, "Reattached kernel driver\n");
-		else
-			fprintf(stderr, "Reattaching kernel driver failed!\n");
-	}
+		if (dev->driver_active) {
+			if (!libusb_attach_kernel_driver(dev->devh, 0))
+				fprintf(stderr, "Reattached kernel driver\n");
+			else
+				fprintf(stderr, "Reattaching kernel driver failed!\n");
+		}
 #endif
+	
+		libusb_close(dev->devh);
+	
+		libusb_exit(dev->ctx);
+	}
 
-	libusb_close(dev->devh);
-
-	libusb_exit(dev->ctx);
+	logfile_close(dev);
 
 	free(dev);
 
@@ -1675,10 +1872,15 @@ int rtlsdr_reset_buffer(rtlsdr_dev_t *dev)
 
 int rtlsdr_read_sync(rtlsdr_dev_t *dev, void *buf, int len, int *n_read)
 {
+	int r;
 	if (!dev)
 		return -1;
 
-	return libusb_bulk_transfer(dev->devh, 0x81, buf, len, n_read, BULK_TIMEOUT);
+	logfile_write_time(dev);
+	r = libusb_bulk_transfer(dev->devh, 0x81, buf, len, n_read, BULK_TIMEOUT);
+	if (*n_read > 0)
+		logfile_write_data(dev, buf, *n_read);
+	return r;
 }
 
 static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
@@ -1686,9 +1888,11 @@ static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
 	rtlsdr_dev_t *dev = (rtlsdr_dev_t *)xfer->user_data;
 
 	if (LIBUSB_TRANSFER_COMPLETED == xfer->status) {
+		logfile_write_data(dev, xfer->buffer, xfer->actual_length);
 		if (dev->cb)
 			dev->cb(xfer->buffer, xfer->actual_length, dev->cb_ctx);
 
+		logfile_write_time(dev);
 		libusb_submit_transfer(xfer); /* resubmit transfer */
 		dev->xfer_errors = 0;
 	} else if (LIBUSB_TRANSFER_CANCELLED != xfer->status) {
@@ -1814,6 +2018,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 					  (void *)dev,
 					  BULK_TIMEOUT);
 
+		logfile_write_time(dev);
 		r = libusb_submit_transfer(dev->xfer[i]);
 		if (r < 0) {
 			fprintf(stderr, "Failed to submit transfer %i!\n", i);

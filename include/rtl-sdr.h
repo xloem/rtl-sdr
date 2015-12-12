@@ -62,6 +62,10 @@ RTLSDR_API int rtlsdr_get_index_by_serial(const char *serial);
 
 RTLSDR_API int rtlsdr_open(rtlsdr_dev_t **dev, uint32_t index);
 
+RTLSDR_API int rtlsdr_begin_logfile(rtlsdr_dev_t *dev, const char *logfile);
+
+RTLSDR_API int rtlsdr_open_logfile(rtlsdr_dev_t **dev, const char *logfile);
+
 RTLSDR_API int rtlsdr_close(rtlsdr_dev_t *dev);
 
 /* configuration functions */
@@ -331,7 +335,18 @@ RTLSDR_API int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on);
  */
 RTLSDR_API int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev);
 
+/**
+ * Get timestamps around the last data block recieved.
+ *
+ * \param dev the device handle
+ * \param pre time of data request
+ * \param post time of data return
+ */
+RTLSDR_API void rtlsdr_get_timestamp(rtlsdr_dev_t *dev, struct timespec *pre, struct timespec *post);
+
 /* streaming functions */
+
+RTLSDR_API int rtlsdr_read_logfile(rtlsdr_dev_t *dev, void *buf, unsigned int len, uint32_t *n_read);
 
 RTLSDR_API int rtlsdr_reset_buffer(rtlsdr_dev_t *dev);
 
