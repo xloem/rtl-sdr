@@ -335,6 +335,17 @@ RTLSDR_API int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev);
 
 RTLSDR_API int rtlsdr_reset_buffer(rtlsdr_dev_t *dev);
 
+/*!
+ * Read samples from the device synchronously.  One request for data will be sent
+ * to the device and returned.  rtlsdr_read_async is preferred for streaming, as
+ * it provides for multiple buffers to be queued on the wire simultaneously.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param buf buffer to be filled with samples (interleaved uint8_t IQ pairs)
+ * \param len length of buf in bytes
+ * \param n_read output location for number of bytes read
+ * \return 0 on success
+ */
 RTLSDR_API int rtlsdr_read_sync(rtlsdr_dev_t *dev, void *buf, int len, int *n_read);
 
 typedef void(*rtlsdr_read_async_cb_t)(unsigned char *buf, uint32_t len, void *ctx);
@@ -371,6 +382,77 @@ RTLSDR_API int rtlsdr_read_async(rtlsdr_dev_t *dev,
 				 void *ctx,
 				 uint32_t buf_num,
 				 uint32_t buf_len);
+
+typedef struct libusb_transfer * buf_handle_t;
+typedef void(*rtlsdr_read_async_ex_cb_t)(buf_handle_t release_hdl, unsigned char *buf, uint32_t len, void *ctx);
+
+/*!
+ * Read samples from the device asynchronously using long-lived DMA buffers.
+ * This function will block until it is canceled using rtlsdr_cancel_async().
+ *
+ * The memory buffers passed to the callback will continue to be valid, and may
+ * be read from in other threads, until released with rtlsdr_async_ex_release().
+ * Because buffers will not be reused until released, rtlsdr_async_ex_release()
+ * must be called within an average of buf_len / sample_rate seconds of every
+ * callback, or there will be gaps in the stream.
+ *
+ * Unlike rtlsdr_read_async(), rtlsdr_read_async_ex() will additionally call
+ * the callback in the case of failed USB transfers, passing len = 0.  These
+ * could indicate a gap in the stream.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param cb callback function to return received samples.
+ *      each call will be in the same thread, in the order of receipt
+ * \param ctx user specific context to pass via the callback function
+ * \param buf_num optional total number of zerocopy buffers to maintain.
+ *      once these are exhausted, data will no longer stream until
+ *      they are passed to rtlsdr_async_ex_release() for reuse.
+ *		  set to 0 for default buffer count (15)
+ * \param buf_len optional buffer length, must be multiple of 512,
+ *		  should be a multiple of 16384 (URB size), set to 0
+ *		  for default buffer length (16 * 32 * 512)
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_read_async_ex(rtlsdr_dev_t *dev,
+                                    rtlsdr_read_async_ex_cb_t cb,
+                                    void *ctx,
+                                    uint32_t buf_num,
+                                    uint32_t buf_len);
+
+/*!
+ * Release a long-lived DMA buffer that was passed to a callback during a run
+ * of rtlsdr_read_async_ex().  Each zerocopy buffer passed to the callback has
+ * been reserved for that block of data, and will not be reused until this
+ * function is called to release it.
+ *
+ * There must be enough released buffers submitted to libusb to accommodate
+ * driver and hardware communication latency.  The total number of buffers
+ * filling this role, and the total number of buffers unreleased, can be
+ * calculated:
+ *
+ *   buf_num = value passed to rtlsdr_read_async_ex
+ *   callback_calls = number of times the callback function has been called
+ *   buf_releases = number of successful calls to rtlsdr_async_ex_release
+ *
+ *   bufs_reserved = callback_calls - buf_releases
+ *   bufs_in_flight = buf_num - bufs_reserved
+ *
+ * Note that this calculation assumes that all reserved buffers have been
+ * passed to the callback already; hence it is not be valid after making a
+ * blocking call inside the callback, as there may be more reserved buffers
+ * queued up that will be delivered after the callback returns.
+ *
+ * Once bufs_in_flight falls too low, there may be gaps in the data stream.
+ * The cutoff point for this value depends on latency in the operating system
+ * and hardware.
+ *
+ * Once bufs_in_flight hits zero, streaming will stop completely.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param release_hdl the buffer passed to the callback
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, buf_handle_t release_hdl);
 
 /*!
  * Cancel all pending asynchronous operations on the device.

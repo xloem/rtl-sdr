@@ -99,7 +99,7 @@ struct rtlsdr_dev {
 	uint32_t xfer_buf_len;
 	struct libusb_transfer **xfer;
 	unsigned char **xfer_buf;
-	rtlsdr_read_async_cb_t cb;
+	rtlsdr_read_async_ex_cb_t cb;
 	void *cb_ctx;
 	enum rtlsdr_async_status async_status;
 	int async_cancel;
@@ -1697,14 +1697,16 @@ int rtlsdr_read_sync(rtlsdr_dev_t *dev, void *buf, int len, int *n_read)
 static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
 {
 	rtlsdr_dev_t *dev = (rtlsdr_dev_t *)xfer->user_data;
+	uint32_t passed_len;
+
+	if (xfer->status == LIBUSB_TRANSFER_CANCELLED)
+		return;
 
 	if (LIBUSB_TRANSFER_COMPLETED == xfer->status) {
-		if (dev->cb)
-			dev->cb(xfer->buffer, xfer->actual_length, dev->cb_ctx);
-
-		libusb_submit_transfer(xfer); /* resubmit transfer */
 		dev->xfer_errors = 0;
-	} else if (LIBUSB_TRANSFER_CANCELLED != xfer->status) {
+
+		passed_len = xfer->actual_length;
+	} else {
 #ifndef _WIN32
 		if (LIBUSB_TRANSFER_ERROR == xfer->status)
 			dev->xfer_errors++;
@@ -1716,9 +1718,18 @@ static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
 			rtlsdr_cancel_async(dev);
 			fprintf(stderr, "cb transfer status: %d, "
 				"canceling...\n", xfer->status);
+
+      return;
 #ifndef _WIN32
 		}
 #endif
+		passed_len = 0;
+	}
+
+	if (dev->cb) {
+		dev->cb(xfer, xfer->buffer, passed_len, dev->cb_ctx);
+	} else {
+		rtlsdr_async_ex_release(dev, xfer);
 	}
 }
 
@@ -1830,8 +1841,38 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 	return 0;
 }
 
+struct rtlsdr_read_async_cb_data
+{
+	rtlsdr_dev_t * dev;
+	rtlsdr_read_async_cb_t cb;
+	void * ctx;
+};
+
+void rtlsdr_read_async_cb_wrapper(buf_handle_t release_hdl, unsigned char *buf,
+				  uint32_t len, void *ctx)
+{
+	struct rtlsdr_read_async_cb_data * data = ctx;
+
+	if (data->cb && len > 0) {
+		data->cb(buf, len, data->ctx);
+	}
+
+	rtlsdr_async_ex_release(data->dev, release_hdl);
+}
+
 int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 			  uint32_t buf_num, uint32_t buf_len)
+{
+	struct rtlsdr_read_async_cb_data data;
+	data.dev = dev;
+	data.cb = cb;
+	data.ctx = ctx;
+
+	return rtlsdr_read_async_ex(dev, rtlsdr_read_async_cb_wrapper, &data,
+				    buf_num, buf_len);
+}
+int rtlsdr_read_async_ex(rtlsdr_dev_t *dev, rtlsdr_read_async_ex_cb_t cb, void *ctx,
+			 uint32_t buf_num, uint32_t buf_len)
 {
 	unsigned int i;
 	int r = 0;
@@ -1937,6 +1978,11 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 	dev->async_status = next_status;
 
 	return r;
+}
+
+int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, buf_handle_t release_hdl)
+{
+	return libusb_submit_transfer(release_hdl); /* resubmit transfer */
 }
 
 int rtlsdr_cancel_async(rtlsdr_dev_t *dev)
