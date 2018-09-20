@@ -1848,7 +1848,7 @@ struct rtlsdr_read_async_cb_data
 	void * ctx;
 };
 
-void rtlsdr_read_async_cb_wrapper(buf_handle_t release_hdl, unsigned char *buf,
+void rtlsdr_read_async_cb_wrapper(rtlsdr_buf_t release_hdl, unsigned char *buf,
 				  uint32_t len, void *ctx)
 {
 	struct rtlsdr_read_async_cb_data * data = ctx;
@@ -1980,7 +1980,7 @@ int rtlsdr_read_async_ex(rtlsdr_dev_t *dev, rtlsdr_read_async_ex_cb_t cb, void *
 	return r;
 }
 
-int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, buf_handle_t release_hdl)
+int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, rtlsdr_buf_t release_hdl)
 {
 	return libusb_submit_transfer(release_hdl); /* resubmit transfer */
 }

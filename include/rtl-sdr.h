@@ -383,8 +383,8 @@ RTLSDR_API int rtlsdr_read_async(rtlsdr_dev_t *dev,
 				 uint32_t buf_num,
 				 uint32_t buf_len);
 
-typedef struct libusb_transfer * buf_handle_t;
-typedef void(*rtlsdr_read_async_ex_cb_t)(buf_handle_t release_hdl, unsigned char *buf, uint32_t len, void *ctx);
+typedef struct libusb_transfer * rtlsdr_buf_t;
+typedef void(*rtlsdr_read_async_ex_cb_t)(rtlsdr_buf_t release_hdl, unsigned char *buf, uint32_t len, void *ctx);
 
 /*!
  * Read samples from the device asynchronously using long-lived DMA buffers.
@@ -452,7 +452,7 @@ RTLSDR_API int rtlsdr_read_async_ex(rtlsdr_dev_t *dev,
  * \param release_hdl the buffer passed to the callback
  * \return 0 on success
  */
-RTLSDR_API int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, buf_handle_t release_hdl);
+RTLSDR_API int rtlsdr_async_ex_release(rtlsdr_dev_t *dev, rtlsdr_buf_t release_hdl);
 
 /*!
  * Cancel all pending asynchronous operations on the device.
