@@ -103,6 +103,7 @@ struct rtlsdr_dev {
 	void *cb_ctx;
 	enum rtlsdr_async_status async_status;
 	int async_cancel;
+	int manual_release;
 	int use_zerocopy;
 	/* rtl demod context */
 	uint32_t rate; /* Hz */
@@ -1702,7 +1703,8 @@ static void LIBUSB_CALL _libusb_callback(struct libusb_transfer *xfer)
 		if (dev->cb)
 			dev->cb(xfer->buffer, xfer->actual_length, dev->cb_ctx);
 
-		libusb_submit_transfer(xfer); /* resubmit transfer */
+		if (!dev->manual_release)
+			libusb_submit_transfer(xfer); /* resubmit transfer */
 		dev->xfer_errors = 0;
 	} else if (LIBUSB_TRANSFER_CANCELLED != xfer->status) {
 #ifndef _WIN32
@@ -1753,7 +1755,8 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 
 	dev->use_zerocopy = 1;
 	for (i = 0; i < dev->xfer_buf_num; ++i) {
-		dev->xfer_buf[i] = libusb_dev_mem_alloc(dev->devh, dev->xfer_buf_len);
+		dev->xfer_buf[i] = libusb_dev_mem_alloc(dev->devh, dev->xfer_buf_len
+						+ sizeof(struct libusb_transfer *));
 
 		if (!dev->xfer_buf[i]) {
 			fprintf(stderr, "Failed to allocate zero-copy "
@@ -1780,7 +1783,8 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 	/* no zero-copy available, allocate buffers in userspace */
 	if (!dev->use_zerocopy) {
 		for (i = 0; i < dev->xfer_buf_num; ++i) {
-			dev->xfer_buf[i] = malloc(dev->xfer_buf_len);
+			dev->xfer_buf[i] = malloc(dev->xfer_buf_len +
+						sizeof(struct libusb_transfer *));
 
 			if (!dev->xfer_buf[i])
 				return -ENOMEM;
@@ -1873,6 +1877,9 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 					  (void *)dev,
 					  BULK_TIMEOUT);
 
+		*(struct libusb_transfer **)(dev->xfer_buf[i] + dev->xfer_buf_len) =
+			dev->xfer[i];
+
 		r = libusb_submit_transfer(dev->xfer[i]);
 		if (r < 0) {
 			fprintf(stderr, "Failed to submit transfer %i\n"
@@ -1959,6 +1966,31 @@ int rtlsdr_cancel_async(rtlsdr_dev_t *dev)
 	}
 #endif
 	return -2;
+}
+
+int rtlsdr_set_automatic_release(rtlsdr_dev_t *dev, int on)
+{
+	if (!dev)
+		return -1;
+
+	if (RTLSDR_INACTIVE != dev->async_status)
+		return -2;
+
+	dev->manual_release = !on;
+
+	return 0;
+}
+
+int rtlsdr_release_manual(rtlsdr_dev_t *dev, unsigned char *buf)
+{
+	struct libusb_transfer * xfer;
+
+	if (!dev)
+		return -1;
+
+	xfer = *(struct libusb_transfer **)(buf + dev->xfer_buf_len);
+
+	return libusb_submit_transfer(xfer);
 }
 
 uint32_t rtlsdr_get_tuner_clock(void *dev)

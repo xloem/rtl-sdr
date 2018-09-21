@@ -331,6 +331,7 @@ RTLSDR_API int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on);
  */
 RTLSDR_API int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev);
 
+
 /* streaming functions */
 
 RTLSDR_API int rtlsdr_reset_buffer(rtlsdr_dev_t *dev);
@@ -379,6 +380,55 @@ RTLSDR_API int rtlsdr_read_async(rtlsdr_dev_t *dev,
  * \return 0 on success
  */
 RTLSDR_API int rtlsdr_cancel_async(rtlsdr_dev_t *dev);
+
+/*!
+ * Enable or disable automatic resubmission of async transfer buffers.
+ * By default this is enabled, but if disabled then buffers will not
+ * be refilled with data until passed to rtlsdr_release_manual().
+ *
+ * This allows applications to track buildup of streaming buffers
+ * by returning from the callback quickly, without requiring an
+ * extra memcpy to take the data out of the callback for processing.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param on 0 means disabled, 1 enabled
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_set_automatic_release(rtlsdr_dev_t *dev, int on);
+
+/*!
+* When automatic releases are disabled, release a long-lived buffer that
+* was passed to an async callback.  Such buffers will not be reused until
+* released.
+*
+* There must be enough released buffers submitted to libusb at all times
+* to accommodate driver and hardware communication latency.  The total
+* number of buffers filling this role, and the total number of buffers
+* unreleased, can be calculated:
+*
+*   buf_num = value passed to rtlsdr_read_async at stream start
+*   callback_calls = number of times a buf has been passed to callback
+*   buf_releases = number of successful calls to rtlsdr_release_manual()
+*
+*   bufs_reserved = callback_calls - buf_releases
+*   bufs_in_flight = buf_num - bufs_reserved
+*
+* Note that this calculation assumes that all reserved buffers have been
+* passed to the callback already.  It is only useful if the callback
+* returns very quickly every time.  If the callback waits, buffers
+* may accumulate in the waiting time, and only be found when it returns.
+*
+* Once bufs_in_flight falls too low, the integrity of the stream is
+* compromised as the device rewrites over its full buffer.  The cutoff
+* for this depends on latency in the operating system and hardware.
+*
+* Once bufs_in_flight hits zero, streaming will stop completely.
+*
+* \param dev the device handle given by rtlsdr_open()
+* \param buf a pointer to the start of the buffer
+* \return 0 on success
+*/
+RTLSDR_API int rtlsdr_release_manual(rtlsdr_dev_t *dev, unsigned char *buf);
 
 /*!
  * Enable or disable the bias tee on GPIO PIN 0.
