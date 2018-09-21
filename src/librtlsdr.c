@@ -1916,6 +1916,14 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 				if (LIBUSB_TRANSFER_CANCELLED !=
 						dev->xfer[i]->status) {
 					r = libusb_cancel_transfer(dev->xfer[i]);
+					if (r == LIBUSB_ERROR_NOT_FOUND) {
+						/* transfer was not in flight */
+						r = 0;
+						dev->xfer[i]->status =
+							LIBUSB_TRANSFER_CANCELLED;
+						continue;
+					}
+
 					/* handle events after canceling
 					 * to allow transfer status to
 					 * propagate */
