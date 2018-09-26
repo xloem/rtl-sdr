@@ -1775,7 +1775,8 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 			if (dev->xfer_buf[i])
 				libusb_dev_mem_free(dev->devh,
 						    dev->xfer_buf[i],
-						    dev->xfer_buf_len);
+						    dev->xfer_buf_len +
+						sizeof(struct libusb_transfer *));
 		}
 	}
 #endif
@@ -1819,7 +1820,8 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 #if defined (__linux__) && LIBUSB_API_VERSION >= 0x01000105
 					libusb_dev_mem_free(dev->devh,
 							    dev->xfer_buf[i],
-							    dev->xfer_buf_len);
+							    dev->xfer_buf_len +
+						sizeof(struct libusb_transfer *));
 #endif
 				} else {
 					free(dev->xfer_buf[i]);
