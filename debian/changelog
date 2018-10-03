@@ -1,3 +1,9 @@
+rtl-sdr (0.7git) unstable; urgency=medium
+
+  * Accumulated changes from librtlsdr community
+
+ -- Karl Semich <0xloem@gmail.com>  Sun, 06 Jun 2018 15:09:42 +0200
+
 rtl-sdr (0.6git) unstable; urgency=medium
 
   * New upstream release
